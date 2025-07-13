@@ -54,7 +54,7 @@ jobs:
 
       - name: Authenticate Docker to Yandex Container Registry
         run: |
-          echo "${{ secrets.YC_OAUTH_TOKEN }}" \
+          printf '%s' "${{ secrets.YC_OAUTH_TOKEN }}" \
             | docker login --username oauth --password-stdin cr.yandex
 
       - name: Push images to Yandex CR
