@@ -1,49 +1,90 @@
-name: Fix Release
+  name: Fix Release
 
-on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Номер релиза'
-        required: true
+  on:
+    workflow_dispatch:
+      inputs:
+        version:
+          description: 'Номер релиза'
+          required: true
 
-env:
-  CR: cr.yandex/crpvn4spj16vplr31itj
+  env:
+    APP_NAME: app
+    REGISTRY_HOST: cr.yandex
+    REESTR_ID: crpvn4spj16vplr31itj
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: npm ci
-      - run: npm run lint
-      - run: npm test
+  jobs:
+    lint-test:
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout release branch
+          uses: actions/checkout@v4
+          with:
+            ref: releases/${{ github.event.inputs.version }}
 
-  build-push:
-    needs: check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Сборка и пуш fix‑образа
-        run: |
-          ver=${{ github.event.inputs.version }}
-          fix=${{ github.run_number }}
-          docker build -t $CR/app:${ver}_fix${fix} -t $CR/app:${ver}_latest .
-          echo ${{ secrets.YC_OAUTH_TOKEN }} | docker login --username oauth --password-stdin $CR
-          docker push $CR/app:${ver}_fix${fix}
-          docker push $CR/app:${ver}_latest
+        - name: Setup Node.js
+          uses: actions/setup-node@v4
+          with:
+            node-version: 20
 
-  tag-comment:
-    needs: build-push
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Создать fix‑тег и прокомментировать Issue
-        run: |
-          ver=${{ github.event.inputs.version }}
-          fix=${{ github.run_number }}
-          tag=${ver}_fix${fix}
-          git tag -a ${tag} -m "Fix ${tag}"
-          git push origin ${tag}
-          gh issue comment ${ver} \
-            --body "Дата фикса: $(date +'%Y-%m-%d')\nАвтор: $GITHUB_ACTOR\nКоммиты:\n$(git log ${ver}_fix$((fix-1))..HEAD --oneline)\nDocker: $CR/app:${ver}_fix${fix}"
+        - name: Install dependencies
+          run: npm ci
+
+        - name: Lint code
+          run: npm run lint
+
+        - name: Run tests
+          run: npm test
+
+    build-and-push-fix:
+      needs: lint-test
+      runs-on: ubuntu-latest
+      env:
+        VERSION: ${{ github.event.inputs.version }}
+        CR_PATH: ${{ env.REGISTRY_HOST }}/${{ env.REESTR_ID }}
+      steps:
+        - name: Build Fix Docker image
+          run: |
+            FIX_NUM=${{ github.run_number }}
+            docker build \
+              -t "$CR_PATH/$APP_NAME:${VERSION}_fix${FIX_NUM}" \
+              -t "$CR_PATH/$APP_NAME:latest" .
+
+        - name: Authenticate to Yandex Container Registry
+          run: |
+            printf '%s' "${{ secrets.YCR_TOKEN }}" \
+              | docker login --username oauth --password-stdin "${{ env.REGISTRY_HOST }}"
+
+        - name: Push Fix images
+          run: |
+            FIX_NUM=${{ github.run_number }}
+            docker push "$CR_PATH/$APP_NAME:${VERSION}_fix${FIX_NUM}"
+            docker push "$CR_PATH/$APP_NAME:latest"
+
+    tag-and-comment:
+      needs: build-and-push-fix
+      runs-on: ubuntu-latest
+      env:
+        VERSION: ${{ github.event.inputs.version }}
+        CR_PATH: ${{ env.REGISTRY_HOST }}/${{ env.REESTR_ID }}
+      steps:
+        - name: Checkout release branch
+          uses: actions/checkout@v4
+          with:
+            ref: releases/${{ env.VERSION }}
+
+        - name: Create fix release tag
+          run: |
+            FIX_NUM=${{ github.run_number }}
+            TAG="${VERSION}_fix${FIX_NUM}"
+            git config user.name  "${{ github.actor }}"
+            git config user.email "${{ github.actor }}@users.noreply.github.com"
+            git tag -a "$TAG" -m "Fix release $TAG"
+            git push origin "$TAG"
+
+        - name: Comment on release issue
+          run: |
+            FIX_NUM=${{ github.run_number }}
+            TAG="${VERSION}_fix${FIX_NUM}"
+            LOG=$(git log ${VERSION}_fix$((FIX_NUM-1))..HEAD --pretty=format:'- %s (%an)' || echo '- no additional commits')
+            gh issue comment "${VERSION}" \
+              --body "Fix $TAG deployed on $(date +'%Y-%m-%d') by @${{ github.actor }}\n\nCommits:\n${LOG}\n\nDocker images:\n- $CR_PATH/$APP_NAME:$TAG\n- $CR_PATH/$APP_NAME:latest"
