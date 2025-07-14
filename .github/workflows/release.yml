@@ -1,92 +1,110 @@
-name: Release
+  name: Create Release
 
-on:
-  workflow_dispatch:
+  on:
+    workflow_dispatch:
 
-env:
-  CR: cr.yandex/crpvn4spj16vplr31itj
+  env:
+    APP_NAME: app
+    REGISTRY_HOST: cr.yandex
+    REESTR_ID: crpvn4spj16vplr31itj
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    outputs:
-      ok: ${{ steps.lint.outcome == 'success' && steps.test.outcome == 'success' }}
-    steps:
-      - uses: actions/checkout@v3
+  jobs:
+    check:
+      runs-on: ubuntu-latest
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v3
 
-      - uses: actions/setup-node@v3
-        with:
-          node-version: 18
+        - name: Setup Node.js
+          uses: actions/setup-node@v3
+          with:
+            node-version: 18
 
-      - run: npm ci
+        - name: Install dependencies
+          run: npm ci
 
-      - id: lint
-        run: npm run lint
+        - name: Lint code
+          run: npm run lint
 
-      - id: test
-        run: npm test
+        - name: Run tests
+          run: npm test
 
-  cut-branch:
-    needs: check
-    if: needs.check.outputs.ok == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+    cut-release-branch:
+      needs: check
+      runs-on: ubuntu-latest
+      if: ${{ needs.check.result == 'success' }}
+      steps:
+        - uses: actions/checkout@v3
+        - name: Create release branch
+          run: |
+            ver=${{ github.run_number }}
+            git config user.name github-actions
+            git config user.email actions@github.com
+            git checkout -b releases/${ver}
+            git push origin releases/${ver}
 
-      - name: Создать release-ветку
-        run: |
-          ver=${{ github.run_number }}
-          git config user.name github-actions
-          git config user.email actions@github.com
-          git checkout -b releases/${ver}
-          git push origin releases/${ver}
+    build-and-push:
+      needs: cut-release-branch
+      runs-on: ubuntu-latest
+      env:
+        VERSION: ${{ github.run_number }}
+        CR_PATH: ${{ env.REGISTRY_HOST }}/${{ env.REESTR_ID }}
+      steps:
+        - uses: actions/checkout@v3
 
-  build-push:
-    needs: cut-branch
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+        - name: Build Docker image
+          run: |
+            docker build \
+              -t $CR_PATH/$APP_NAME:${VERSION} \
+              -t $CR_PATH/$APP_NAME:${VERSION}_latest .
 
-      - name: Собрать Docker image и затегать
-        run: |
-          ver=${{ github.run_number }}
-          docker build -t $CR/app:${ver} -t $CR/app:${ver}_latest .
+        - name: Login to Yandex Container Registry
+          run: |
+            printf '%s' "${{ secrets.YCR_TOKEN }}" \
+              | docker login --username oauth --password-stdin ${{ env.REGISTRY_HOST }}
 
-      - name: Authenticate Docker to Yandex Container Registry
-        run: |
-          printf '%s' "${{ secrets.YC_OAUTH_TOKEN }}" \
-            | docker login --username oauth --password-stdin cr.yandex
+        - name: Push images
+          run: |
+            docker push $CR_PATH/$APP_NAME:${VERSION}
+            docker push $CR_PATH/$APP_NAME:${VERSION}_latest
 
-      - name: Push images to Yandex CR
-        run: |
-          docker push $CR/app:${ver}
-          docker push $CR/app:${ver}_latest
+    tag-and-changelog:
+      needs: build-and-push
+      runs-on: ubuntu-latest
+      env:
+        VERSION: ${{ github.run_number }}
+      steps:
+        - uses: actions/checkout@v3
+          with:
+            fetch-depth: 0
 
-  tag-and-changelog:
-    needs: build-push
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+        - name: Create Git tag
+          run: |
+            git tag -a ${VERSION} -m "Release ${VERSION}"
+            git push origin ${VERSION}
 
-      - name: Создать git‑тег
-        run: |
-          ver=${{ github.run_number }}
-          git tag -a ${ver} -m "Release ${ver}"
-          git push origin ${ver}
+        - name: Generate and prepend changelog
+          run: |
+            last=$(git describe --tags --abbrev=0 ${VERSION}^ || echo "")
+            commits=$(git log $last..HEAD --pretty=format:'- %s')
+            echo -e "## ${VERSION} — $(date +'%Y-%m-%d')\n${commits}\n" > header.md
+            cat header.md CHANGELOG.md > CHANGELOG.new
+            mv CHANGELOG.new CHANGELOG.md
+            git add CHANGELOG.md
+            git commit -m "chore: update CHANGELOG for ${VERSION}"
+            git push origin releases/${VERSION}
 
-      - name: Обновить CHANGELOG.md и создать Issue
-        run: |
-          ver=${{ github.run_number }}
-          last=$(git describe --tags --abbrev=0 HEAD^)
-          commits=$(git log $last..HEAD --pretty=format:'- %s')
-          {
-            echo "## ${ver} — $(date +'%Y-%m-%d')"
-            echo "${commits}"
-          } > tmp.md
-          cat tmp.md CHANGELOG.md > CHANGELOG.md
-          git add CHANGELOG.md
-          git commit -m "chore: update CHANGELOG for ${ver}"
-          git push origin releases/${ver}
-          gh issue create \
-            --title "Release ${ver}" \
-            --body "Дата: $(date +'%Y-%m-%d')\nАвтор: $GITHUB_ACTOR\nВерсия: ${ver}\n\nКоммиты:\n${commits}\n\nDocker: $CR/app:${ver}"
+    create-issue:
+      needs: tag-and-changelog
+      runs-on: ubuntu-latest
+      env:
+        VERSION: ${{ github.run_number }}
+      steps:
+        - uses: actions/checkout@v3
+
+        - name: Create GitHub Issue for Release
+          run: |
+            commits=$(git log $(git describe --tags --abbrev=0 ${VERSION}^ || echo HEAD)..HEAD --pretty=format:'- %s')
+            gh issue create \
+              --title "Release ${VERSION}" \
+              --body "Дата: $(date +'%Y-%m-%d')\nАвтор: $GITHUB_ACTOR\nВерсия: ${VERSION}\n\nКоммиты:\n${commits}\n\nDocker образы:\n- $CR_PATH/$APP_NAME:${VERSION}\n- $CR_PATH/$APP_NAME:${VERSION}_latest"
