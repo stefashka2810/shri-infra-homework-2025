@@ -78,6 +78,11 @@
           with:
             fetch-depth: 0
 
+        - name: Set Git committer identity
+          run: |
+            git config user.name  "${{ github.actor }}"
+            git config user.email "${{ github.actor }}@users.noreply.github.com"
+
         - name: Create Git tag
           run: |
             git tag -a ${VERSION} -m "Release ${VERSION}"
@@ -85,17 +90,13 @@
 
         - name: Generate and prepend changelog
           run: |
-            LAST_TAG=$(git describe --tags --abbrev=0 ${VERSION}^ 2>/dev/null || echo "")
-            if [ -n "$LAST_TAG" ]; then
-              RANGE="$LAST_TAG..HEAD"
-            else
-              RANGE="HEAD"
-            fi
-            COMMITS=$(git log $RANGE --pretty=format:'- %s')
-            echo -e "## ${VERSION} — $(date +'%Y-%m-%d')\n${COMMITS}\n" > header.md
-            cat header.md CHANGELOG.md > CHANGELOG.new
-            mv CHANGELOG.new CHANGELOG.md
+            # ... ваш скрипт генерации header.md ...
             git add CHANGELOG.md
+
+        - name: Commit CHANGELOG.md
+          run: |
+            git config user.name  "${{ github.actor }}"
+            git config user.email "${{ github.actor }}@users.noreply.github.com"
             git commit -m "chore: update CHANGELOG for ${VERSION}"
             git push origin releases/${VERSION}
 
