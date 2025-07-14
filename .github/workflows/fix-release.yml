@@ -38,53 +38,64 @@
     build-and-push-fix:
       needs: lint-test
       runs-on: ubuntu-latest
-      env:
-        VERSION: ${{ github.event.inputs.version }}
-        CR_PATH: ${{ env.REGISTRY_HOST }}/${{ env.REESTR_ID }}
       steps:
-        - name: Build Fix Docker image
-          run: |
-            FIX_NUM=${{ github.run_number }}
-            docker build \
-              -t "$CR_PATH/$APP_NAME:${VERSION}_fix${FIX_NUM}" \
-              -t "$CR_PATH/$APP_NAME:latest" .
+        - name: Checkout release branch
+          uses: actions/checkout@v4
+          with:
+            ref: releases/${{ github.event.inputs.version }}
 
         - name: Authenticate to Yandex Container Registry
           run: |
             printf '%s' "${{ secrets.YCR_TOKEN }}" \
-              | docker login --username oauth --password-stdin "${{ env.REGISTRY_HOST }}"
+              | docker login --username oauth --password-stdin "$REGISTRY_HOST"
 
-        - name: Push Fix images
+        - name: Build & Push Fix Docker image
           run: |
+            VERSION=${{ github.event.inputs.version }}
             FIX_NUM=${{ github.run_number }}
-            docker push "$CR_PATH/$APP_NAME:${VERSION}_fix${FIX_NUM}"
-            docker push "$CR_PATH/$APP_NAME:latest"
+            IMAGE_PATH="$REGISTRY_HOST/$REESTR_ID/$APP_NAME"
+            docker build \
+              -t "$IMAGE_PATH:${VERSION}_fix${FIX_NUM}" \
+              -t "$IMAGE_PATH:latest" .
+            docker push "$IMAGE_PATH:${VERSION}_fix${FIX_NUM}"
+            docker push "$IMAGE_PATH:latest"
 
     tag-and-comment:
       needs: build-and-push-fix
       runs-on: ubuntu-latest
       env:
-        VERSION: ${{ github.event.inputs.version }}
-        CR_PATH: ${{ env.REGISTRY_HOST }}/${{ env.REESTR_ID }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       steps:
         - name: Checkout release branch
           uses: actions/checkout@v4
           with:
-            ref: releases/${{ env.VERSION }}
+            ref: releases/${{ github.event.inputs.version }}
+
+        - name: Set Git committer identity
+          run: |
+            git config user.name "${{ github.actor }}"
+            git config user.email "${{ github.actor }}@users.noreply.github.com"
 
         - name: Create fix release tag
           run: |
+            VERSION=${{ github.event.inputs.version }}
             FIX_NUM=${{ github.run_number }}
             TAG="${VERSION}_fix${FIX_NUM}"
-            git config user.name  "${{ github.actor }}"
-            git config user.email "${{ github.actor }}@users.noreply.github.com"
             git tag -a "$TAG" -m "Fix release $TAG"
             git push origin "$TAG"
 
         - name: Comment on release issue
           run: |
+            VERSION=${{ github.event.inputs.version }}
             FIX_NUM=${{ github.run_number }}
-            TAG="${VERSION}_fix${FIX_NUM}"
-            LOG=$(git log ${VERSION}_fix$((FIX_NUM-1))..HEAD --pretty=format:'- %s (%an)' || echo '- no additional commits')
-            gh issue comment "${VERSION}" \
-              --body "Fix $TAG deployed on $(date +'%Y-%m-%d') by @${{ github.actor }}\n\nCommits:\n${LOG}\n\nDocker images:\n- $CR_PATH/$APP_NAME:$TAG\n- $CR_PATH/$APP_NAME:latest"
+            IMAGE_PATH="$REGISTRY_HOST/$REESTR_ID/$APP_NAME"
+            PREV_FIX_NUM=$((FIX_NUM - 1))
+            PREV_TAG="${VERSION}_fix${PREV_FIX_NUM}"
+            if git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+              RANGE="$PREV_TAG..HEAD"
+            else
+              RANGE="HEAD"
+            fi
+            LOG=$(git log "$RANGE" --pretty=format:'- %s (%an)')
+            gh issue comment "${{ github.event.inputs.version }}" \
+              --body "Fix $TAG deployed on $(date +'%Y-%m-%d') by @${{ github.actor }}\n\nCommits:\n${LOG}\n\nDocker images:\n- $IMAGE_PATH:$TAG\n- $IMAGE_PATH:latest"
