@@ -75,8 +75,10 @@ jobs:
     env:
       VERSION: ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout release branch
+        uses: actions/checkout@v3
         with:
+          ref: releases/${{ env.VERSION }}
           fetch-depth: 0
 
       - name: Set Git committer identity
@@ -108,7 +110,9 @@ jobs:
           git config user.name  "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git commit -m "chore: update CHANGELOG for ${VERSION}"
+          # теперь push пойдёт в той же ветке, в которой мы чек-аутнулись
           git push origin releases/${VERSION}
+
 
   create-issue:
     needs: tag-and-changelog
