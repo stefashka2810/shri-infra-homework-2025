@@ -6,122 +6,128 @@
   env:
     APP_NAME: app
     REGISTRY_HOST: cr.yandex
-    REESTR_ID: crpvn4spj16vplr31itj
+    REESTR_ID: crpvn4spj16vplr31itj  # ваш Registry ID прописан напрямую
 
   jobs:
-    check:
+    lint-test:
       runs-on: ubuntu-latest
       steps:
         - name: Checkout repository
-          uses: actions/checkout@v3
+          uses: actions/checkout@v4
 
         - name: Setup Node.js
-          uses: actions/setup-node@v3
+          uses: actions/setup-node@v4
           with:
-            node-version: 18
+            node-version: 20
 
-        - name: Install dependencies
-          run: npm ci
-
-        - name: Lint code
-          run: npm run lint
-
-        - name: Run tests
-          run: npm test
-
-    cut-release-branch:
-      needs: check
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v3
-
-        - name: Create release branch
-          run: |
-            ver=${{ github.run_number }}
-            git config user.name github-actions
-            git config user.email actions@github.com
-            git checkout -b releases/${ver}
-            git push origin releases/${ver}
+        - run: npm ci
+        - run: npm run lint
+        - run: npm test
 
     build-and-push:
-      needs: cut-release-branch
+      name: Build & Push Docker
+      needs: lint-test
       runs-on: ubuntu-latest
       env:
         VERSION: ${{ github.run_number }}
+        REGISTRY_HOST: cr.yandex
+        REESTR_ID: crpvn4spj16vplr31itj
+        APP_NAME: app
       steps:
-        - uses: actions/checkout@v3
-
-        - name: Build Docker image
-          run: |
-            CR_PATH="${REGISTRY_HOST}/${REESTR_ID}"
-            docker build \
-              -t "$CR_PATH/$APP_NAME:$VERSION" \
-              -t "$CR_PATH/$APP_NAME:${VERSION}_latest" .
+        - name: Checkout code
+          uses: actions/checkout@v4
 
         - name: Login to Yandex Container Registry
           run: |
             printf '%s' "${{ secrets.YCR_TOKEN }}" \
               | docker login --username oauth --password-stdin "$REGISTRY_HOST"
 
-        - name: Push images
+        - name: Build and Push Docker image (with buildx)
           run: |
-            CR_PATH="${REGISTRY_HOST}/${REESTR_ID}"
-            docker push "$CR_PATH/$APP_NAME:$VERSION"
-            docker push "$CR_PATH/$APP_NAME:${VERSION}_latest"
+            docker buildx build \
+              --tag "$REGISTRY_HOST/$REESTR_ID/$APP_NAME:$VERSION" \
+              --tag "$REGISTRY_HOST/$REESTR_ID/$APP_NAME:${VERSION}_latest" \
+              --push \
+              .
 
-    tag-and-changelog:
+    release-branch:
+      name: Create Release Branch
       needs: build-and-push
       runs-on: ubuntu-latest
       env:
         VERSION: ${{ github.run_number }}
       steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
+        - name: Create branch releases/<version>
+          run: |
+            git config user.name "${{ github.actor }}"
+            git config user.email "${{ github.actor }}@users.noreply.github.com"
+            git checkout -b releases/${VERSION}
+            git push origin releases/${VERSION}
+
+    tag-and-changelog:
+      name: Tag & Update Changelog
+      needs: release-branch
+      runs-on: ubuntu-latest
+      env:
+        VERSION: ${{ github.run_number }}
+      steps:
+        - uses: actions/checkout@v4
           with:
+            ref: releases/${{ env.VERSION }}
             fetch-depth: 0
 
-        - name: Set Git committer identity
-          run: |
-            git config user.name  "${{ github.actor }}"
-            git config user.email "${{ github.actor }}@users.noreply.github.com"
+        - name: Fetch all tags
+          run: git fetch --tags
 
-        - name: Create Git tag
+        - name: Create Git tag if missing
           run: |
-            git tag -a ${VERSION} -m "Release ${VERSION}"
-            git push origin ${VERSION}
+            if git tag | grep -qx "${VERSION}"; then
+              echo "Tag ${VERSION} already exists"
+            else
+              git tag ${VERSION}
+              git push origin ${VERSION}
+            fi
 
-        - name: Generate and prepend changelog
+        - name: Generate changelog entry
           run: |
-            LAST_TAG=$(git describe --tags --abbrev=0 ${VERSION}^ 2>/dev/null || echo "")
-            if [ -n "$LAST_TAG" ]; then
-              RANGE="$LAST_TAG..HEAD"
+            PREV_TAG=$(git describe --tags --abbrev=0 ${VERSION}^ || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              RANGE="$PREV_TAG..HEAD"
             else
               RANGE="HEAD"
             fi
-            COMMITS=$(git log $RANGE --pretty=format:'- %s')
-            echo -e "## ${VERSION} — $(date +'%Y-%m-%d')\n${COMMITS}\n" > header.md
-            cat header.md CHANGELOG.md > CHANGELOG.new
-            mv CHANGELOG.new CHANGELOG.md
-            git add CHANGELOG.md
+            COMMITS=$(git log $RANGE --pretty=format:'- %s (%an)')
+            DATE=$(date -u +"%Y-%m-%d")
+            echo -e "## ${VERSION} (${DATE})\n\n${COMMITS}\n" > new_changelog.md
+
+        - name: Prepend to CHANGELOG.md
+          run: |
+            cat new_changelog.md CHANGELOG.md > CHANGELOG.tmp
+            mv CHANGELOG.tmp CHANGELOG.md
 
         - name: Commit CHANGELOG.md
           run: |
-            git config user.name  "${{ github.actor }}"
+            git config user.name "${{ github.actor }}"
             git config user.email "${{ github.actor }}@users.noreply.github.com"
-            git commit -m "chore: update CHANGELOG for ${VERSION}"
+            git add CHANGELOG.md
+            git commit -m "chore: update CHANGELOG for release ${VERSION}" || echo "No changes"
             git push origin releases/${VERSION}
 
     create-issue:
+      name: Create GitHub Issue for Release
       needs: tag-and-changelog
       runs-on: ubuntu-latest
       env:
         VERSION: ${{ github.run_number }}
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
 
-        - name: Create GitHub Issue for Release
+        - name: Create GitHub Issue
           run: |
-            LOG=$(git log $(git describe --tags --abbrev=0 ${VERSION}^ 2>/dev/null || echo HEAD)..HEAD --pretty=format:'- %s (%an)')
+            LOG=$(git log $(git describe --tags --abbrev=0 ${VERSION}^ || echo HEAD)..HEAD --pretty=format:'- %s (%an)')
             gh issue create \
-              --title "Release ${VERSION}" \
-              --body "Дата: $(date +'%Y-%m-%d')\nАвтор: $GITHUB_ACTOR\nВерсия: ${VERSION}\n\nКоммиты:\n${LOG}\n\nDocker образы:\n- ${REGISTRY_HOST}/${REESTR_ID}/${APP_NAME}:${VERSION}\n- ${REGISTRY_HOST}/${REESTR_ID}/${APP_NAME}:${VERSION}_latest"
+              --title "Release v${VERSION}" \
+              --body "Дата: $(date +'%Y-%m-%d')\nАвтор: $GITHUB_ACTOR\nВерсия: ${VERSION}\n\nКоммиты:\n${LOG}\n\nDocker образы:\n- $REGISTRY_HOST/$REESTR_ID/$APP_NAME:${VERSION}\n- $REGISTRY_HOST/$REESTR_ID/$APP_NAME:${VERSION}_latest"
+
